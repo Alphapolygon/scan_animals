@@ -1389,6 +1389,39 @@ async function createWasm() {
           }
       }
 
+  var cameraAccess = 0;
+  
+  function _JS_AsyncWebCam_GetPermission(op, onWebcamAccessResponse) {
+  		if (!navigator.mediaDevices) {
+  			cameraAccess = 2;
+  			getWasmTableEntry(onWebcamAccessResponse)(op);
+  			return;
+  		}
+  		navigator.mediaDevices.getUserMedia({
+  			audio: false,
+  			video: true
+  		}).then(function() {
+  			// getUserMedia requests for permission (we want this) and starts the webcam (we don't want this), we're going to immediately turn it off after getting permission
+  			cameraAccess = 1;
+  			navigator.mediaDevices.enumerateDevices().then(function(devices) {
+  				var promises = queueWebCamDeviceUpdates(devices);
+  				Promise.race([
+  					Promise.all(promises),
+  					// Sometimes calls to getUserMedia hang and don't return any new information, so adding a timeout here was necessary
+  					// See https://jira.unity3d.com/browse/PLAT-15877 for more information on this bug
+  					new Promise((_, reject) => setTimeout(() => reject("Timed out while waiting for device details. Some details may be inaccurate."), 3000))
+  				]).finally(() => {
+  					// Even if we can't get permissions on some devices, update the device list with the info we could get
+  					updateVideoInputDevices(devices);
+  					getWasmTableEntry(onWebcamAccessResponse)(op);
+  				});
+  			});
+  		}).catch(function(err) {
+  			cameraAccess = 2;
+  			getWasmTableEntry(onWebcamAccessResponse)(op);
+  		});
+  	}
+
   var ExceptionsSeen = 0;
   
   function LogErrorWithAdditionalInformation(error) {
@@ -1730,6 +1763,10 @@ async function createWasm() {
   function _JS_GetCompassPermissions() {
           return JS_DeviceOrientationPermissions;
       }
+
+  function _JS_GetCurrentCameraAccessState() {
+  		return cameraAccess;
+  	}
 
   
   function jsGetFileNameWithoutExtension(path) {
@@ -2214,6 +2251,81 @@ async function createWasm() {
   		stringToUTF8(trace, buffer, bufferSize);
   	return lengthBytesUTF8(trace);	
   }
+
+  var Microphone_Access = 0;
+  function _JS_Microphone_GetCurrentAccessState() {
+          return Microphone_Access;
+      }
+
+  var MediaAccessState = {
+  Unknown:0,
+  Granted:1,
+  Denied:2,
+  };
+  
+  
+  var Microphone_DeviceChangeHandlerAttached = false;
+  
+  var Microphones = [];
+  
+  
+  var Microphone_UpdateDevices = function () {
+          Microphones = [];
+  
+          if (Microphone_Access != MediaAccessState.Granted)
+              return Promise.resolve();
+  
+          return navigator.mediaDevices.enumerateDevices().then(function (devices) {
+              devices.forEach((device) => {
+                  // Skip non audio input devices
+                  if (device.kind !== 'audioinput')
+                      return;
+  
+                  device.name = device.label || `Audio input #${device.id+1}`;
+                  Microphones.push(device);
+              });
+          });
+      };
+  
+  function _JS_Microphone_GetPermissionAsync(op, onMicrophone_AccessResponse) {
+          if (!navigator.mediaDevices) {
+              Microphone_Access = MediaAccessState.Denied;
+              getWasmTableEntry(onMicrophone_AccessResponse) (op);
+              return;
+          }
+  
+          navigator.mediaDevices.getUserMedia({
+              audio: true,
+              video: false,
+          }).then(function (stream) {
+              // Disable tracks in stream since we do not want to record yet
+              const tracks = stream.getAudioTracks();
+              tracks.forEach(function (track) {
+                  track.enabled = false;
+              });
+              Microphone_Access = MediaAccessState.Granted;
+  
+              // Update list of audio devices now that we have permission
+              return Microphone_UpdateDevices();
+          }).then(function() {
+              // Register device change handler to update device list when necessary
+              if (!Microphone_DeviceChangeHandlerAttached) {
+                  navigator.mediaDevices.addEventListener('devicechange', Microphone_UpdateDevices);
+                  Microphone_DeviceChangeHandlerAttached = true;
+              }
+  
+              // Finalize permission request
+              getWasmTableEntry(onMicrophone_AccessResponse) (op);
+          }).catch(function (err) {
+              Microphone_Access = MediaAccessState.Denied;
+              // Remove device change handler when authorization was revoked
+              if (Microphone_DeviceChangeHandlerAttached) {
+                  navigator.mediaDevices.removeEventListener('devicechange', Microphone_UpdateDevices);
+                  Microphone_DeviceChangeHandlerAttached = false;
+              }
+              getWasmTableEntry(onMicrophone_AccessResponse) (op);
+          });
+      }
 
   
   
@@ -3674,16 +3786,9 @@ async function createWasm() {
   }
 
   
-  var Microphone_Access = 0;
-  
-  var Microphones = [];
   
   
-  var MediaAccessState = {
-  Unknown:0,
-  Granted:1,
-  Denied:2,
-  };
+  
   function Microphone_GetMediaStream(id, channels, sampleRate) {
           if (Microphone_Access != MediaAccessState.Granted)
               return Promise.reject("No access rights to microphone.");
@@ -16893,7 +16998,6 @@ if (Module['wasmBinary']) wasmBinary = Module['wasmBinary'];
   'wgpuStoreAsyncifiedOp',
   'wgpuPipelineCreationFailed',
   'wgpuOffscreenCanvasListener',
-  'Microphone_UpdateDevices',
   'videoInstanceIdCounter',
   'jsVideoEnded',
   'jsVideoAllAudioTracksAreDisabled',
@@ -16903,7 +17007,6 @@ if (Module['wasmBinary']) wasmBinary = Module['wasmBinary'];
   'jsVideoAttemptToPlayBlockedVideos',
   'jsVideoCreateTexture2D',
   'jsIsWebkit',
-  'cameraAccess',
   'jsWebRequestGetResponseHeaderString',
 ];
 missingLibrarySymbols.forEach(missingLibrarySymbol)
@@ -17309,6 +17412,7 @@ missingLibrarySymbols.forEach(missingLibrarySymbol)
   'Microphone_Access',
   'Microphone_DeviceChangeHandlerAttached',
   'Microphones',
+  'Microphone_UpdateDevices',
   'Microphone_GetMediaStream',
   'Microphone_CopyAudioBuffer',
   'Microphone_DecompressAudioBuffer',
@@ -17367,6 +17471,7 @@ missingLibrarySymbols.forEach(missingLibrarySymbol)
   'jsSupportedVideoFormats',
   'jsUnsupportedVideoFormats',
   'activeWebCams',
+  'cameraAccess',
   'jsMemdUsedJSMemory',
   'jsMemdMeasureState',
   'jsMemdRequestMemoryMeasurement',
@@ -17518,6 +17623,8 @@ var wasmImports = {
   /** @export */
   JS_Accelerometer_Stop: _JS_Accelerometer_Stop,
   /** @export */
+  JS_AsyncWebCam_GetPermission: _JS_AsyncWebCam_GetPermission,
+  /** @export */
   JS_CallAsLongAsNoExceptionsSeen: _JS_CallAsLongAsNoExceptionsSeen,
   /** @export */
   JS_ClearInterval: _JS_ClearInterval,
@@ -17545,6 +17652,8 @@ var wasmImports = {
   JS_Geolocation_Stop: _JS_Geolocation_Stop,
   /** @export */
   JS_GetCompassPermissions: _JS_GetCompassPermissions,
+  /** @export */
+  JS_GetCurrentCameraAccessState: _JS_GetCurrentCameraAccessState,
   /** @export */
   JS_GetDownloadProgress: _JS_GetDownloadProgress,
   /** @export */
@@ -17577,6 +17686,10 @@ var wasmImports = {
   JS_Log_Dump: _JS_Log_Dump,
   /** @export */
   JS_Log_StackTrace: _JS_Log_StackTrace,
+  /** @export */
+  JS_Microphone_GetCurrentAccessState: _JS_Microphone_GetCurrentAccessState,
+  /** @export */
+  JS_Microphone_GetPermissionAsync: _JS_Microphone_GetPermissionAsync,
   /** @export */
   JS_MobileKeyboard_GetIgnoreBlurEvent: _JS_MobileKeyboard_GetIgnoreBlurEvent,
   /** @export */
