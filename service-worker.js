@@ -1,7 +1,7 @@
 // Adapted from the supplied runtime cache. Unity preprocesses a fresh cache ID on export.
 const APP_ROOT = new URL("./", self.location.href);
 const CACHE_PREFIX = "scanimals-web:" + encodeURIComponent(APP_ROOT.pathname) + ":";
-const CACHE_NAME = CACHE_PREFIX + "mvuylayj";
+const CACHE_NAME = CACHE_PREFIX + "mvuzf6cq";
 
 // Keep the normal waiting lifecycle so updates do not replace a worker during a running game.
 self.addEventListener("activate", event => {
